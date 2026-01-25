@@ -359,6 +359,7 @@ def load_truths_correct(tsv_file):
             parts = line.rstrip('\n').split('\t')
             if len(parts) >= 13:
                 try:
+                    timestamp = parts[1]
                     id = parts[0]
                     author = str(parts[5])      # ← CONVERT TO STRING
                     text = parts[9]
@@ -366,6 +367,7 @@ def load_truths_correct(tsv_file):
                     if author and external_id and text:
                         records.append({
                             'id': id,
+                            'timestamp': timestamp,
                             'external_id': external_id,
                             'text': text,
                             'author': author
@@ -376,6 +378,15 @@ def load_truths_correct(tsv_file):
 
 truths = load_truths_correct("truth_social/truths.tsv")
 #print(truths['id'])
+
+original_posts = pd.DataFrame({
+    'engager': truths['author'],
+    'target_user': truths['author'],  # self-posting
+    'timestamp': truths['timestamp'],
+    'interaction': 'POST',
+    'tweet': truths['text']
+})
+
 # Load quotes
 quotes = pd.read_csv(
     "truth_social/quotes.tsv",
@@ -394,7 +405,7 @@ quotes['quoted_truth_external_id'] = quotes['quoted_truth_external_id'].astype(s
 quotes['quoting_user'] = quotes['quoting_user'].astype(str)
 quotes['quoted_user'] = quotes['quoted_user'].astype(str)
 
-
+'''
 activity = quotes.merge(
     truths,
     left_on="quoted_truth_external_id",
@@ -415,6 +426,32 @@ activity["interaction"] = "QT"
 activity = activity[
     ["engager", "target_user", "timestamp", "interaction", "tweet"]
 ].dropna().reset_index(drop=True)
+'''
+
+quotes_with_text = quotes.merge(
+    truths[['external_id', 'text', 'author']],
+    left_on='quoted_truth_external_id',
+    right_on='external_id',
+    how='inner'
+)
+
+quote_activity = pd.DataFrame({
+    'engager': quotes_with_text['quoting_user'],
+    'target_user': quotes_with_text['author'],
+    'timestamp': quotes_with_text['timestamp'],
+    'interaction': 'QT',
+    'tweet': quotes_with_text['text']
+})
+num_quotes = len(quote_activity)  # ~2000
+num_original = 10000 - num_quotes  # ~8000
+
+# 4. Combine: mostly original posts + some quotes
+activity = pd.concat([
+    quote_activity,
+    original_posts.sample(n=num_original, random_state=42)
+], ignore_index=True)
+
+print(f"Final activity shape: {activity.shape}")
 
 # ----------------------------
 # 2. Load real social network
@@ -431,13 +468,25 @@ social.rename(columns={"followed": "followee"}, inplace=True)
 # ----------------------------
 # 3. Subset to top 5K users
 # ----------------------------
-user_counts = pd.concat([activity["engager"], activity["target_user"]]).value_counts()
-#top_users = user_counts.head(5000).index
+# Get top users first
+user_counts = pd.concat([quote_activity["engager"], original_posts["engager"]]).value_counts()
+top_users = user_counts.head(50).index
+
+# Filter original_posts to top users only
+original_posts_filtered = original_posts[original_posts['engager'].isin(top_users)]
+
+# Now sample proportionally
+#num_quotes = len(quote_activity)
+#num_original = min(10000 - num_quotes, len(original_posts_filtered))
+sampled_original = original_posts_filtered.sample(n=len(original_posts_filtered), random_state=42)
+
+activity = pd.concat([quote_activity, sampled_original], ignore_index=True)
+
 top_users = user_counts.index
 activity_sub = activity[
     activity["engager"].isin(top_users) & 
     activity["target_user"].isin(top_users)
-].copy().head(10000).reset_index(drop=True)
+].copy().reset_index(drop=True)
 activity_sub["post_id"] = activity_sub.index
 #social['follower'] = social['follower'].astype(str)
 #social['followee'] = social['followee'].astype(str)
@@ -451,13 +500,14 @@ print("Saving debug sample to debug_activity_sample.txt...")
 debug_sample = activity_sub.copy()
 with open("debug_activity_sample.txt", "w", encoding="utf-8") as f:
     for idx, row in debug_sample.iterrows():
-        f.write(f"=== POST {idx} ===\n")
-        f.write(f"Engager: {row['engager']}\n")
-        f.write(f"Target User: {row['target_user']}\n")
-        f.write(f"Interaction: {row['interaction']}\n")
-        f.write(f"Raw Tweet Text:\n{repr(row['tweet'])}\n")  # Shows hidden chars
-        f.write(f"Cleaned Preview:\n{row['tweet'][:200]}\n")
-        f.write("-" * 50 + "\n\n")
+        if row['engager'] == '11043':
+            f.write(f"=== POST {idx} ===\n")
+            f.write(f"Engager: {row['engager']}\n")
+            f.write(f"Target User: {row['target_user']}\n")
+            f.write(f"Interaction: {row['interaction']}\n")
+            f.write(f"Raw Tweet Text:\n{repr(row['tweet'])}\n")  # Shows hidden chars
+            f.write(f"Cleaned Preview:\n{row['tweet'][:200]}\n")
+            f.write("-" * 50 + "\n\n")
 
 print("✅ Debug sample saved to debug_activity_sample.txt")
 

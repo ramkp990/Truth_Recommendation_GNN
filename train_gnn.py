@@ -399,7 +399,7 @@ graph['post', 'rev_engages', 'user'].edge_index = graph['user', 'engages', 'post
 # Updated WeightedRGCN Model
 # ----------------------------
 class WeightedRGCN(torch.nn.Module):
-    def __init__(self, hidden_dim=64):
+    def __init__(self, hidden_dim=32):
         super().__init__()
         self.msg_direct = SAGEConv((-1, -1), hidden_dim)   # user ← post (engagement)
         self.msg_author = SAGEConv((-1, -1), hidden_dim)   # user ← post (follows author)
@@ -466,7 +466,7 @@ print(f"Users: {num_users}, Posts: {num_posts}")
 # ----------------------------
 # Training Function
 # ----------------------------
-def train():
+def train1():
     model.train()
     optimizer.zero_grad()
 
@@ -482,6 +482,36 @@ def train():
     # Negative sampling: for each positive, sample 1 negative post
     neg_p = torch.randint(0, num_posts, (pos_p.size(0),), device=device)
     neg_scores = (user_emb[pos_u] * post_emb[neg_p]).sum(dim=1)  # [num_pos]
+
+    # Loss
+    pos_loss = criterion(pos_scores, torch.ones_like(pos_scores))
+    neg_loss = criterion(neg_scores, torch.zeros_like(neg_scores))
+    loss = pos_loss + neg_loss
+
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+def train(batch_size=32):
+    model.train()
+    optimizer.zero_grad()
+
+    # Forward pass (still full graph - this is fine for GNNs)
+    out = model(x_dict, graph.edge_index_dict)
+    user_emb = out['user']
+    post_emb = out['post']
+
+    # Sample a mini-batch of positive edges
+    num_pos = train_edge_index.size(1)
+    batch_indices = torch.randperm(num_pos)[:batch_size]
+    pos_u, pos_p = train_edge_index[:, batch_indices]
+
+    # Positive scores
+    pos_scores = (user_emb[pos_u] * post_emb[pos_p]).sum(dim=1)
+
+    # Negative sampling
+    neg_p = torch.randint(0, num_posts, (pos_p.size(0),), device=device)
+    neg_scores = (user_emb[pos_u] * post_emb[neg_p]).sum(dim=1)
 
     # Loss
     pos_loss = criterion(pos_scores, torch.ones_like(pos_scores))
@@ -563,9 +593,10 @@ best_recall = 0.0
 patience = 20
 patience_counter = 0
 
-for epoch in range(1, 101):  # 100 epochs
-    loss = train()
-    
+for epoch in range(1, 101):
+    loss = train(batch_size=32)
+    if epoch % 1 == 0:
+        torch.cuda.empty_cache()
     if epoch % 10 == 0:
         model.eval()
         with torch.no_grad():
@@ -655,10 +686,10 @@ for user_global in test_users_sample:
     print("  ✅ True future engagements:")
     for p in true_posts_global:
         tweet = tweet_lookup.get(p, "[MISSING]")
-        print(f"    - {tweet}..."+ tweet)
+        print(f"    - {tweet[:150]}...")
     
     print("  🎯 Top recommendations:")
     for p in top_posts_global:
         tweet = tweet_lookup.get(p, "[MISSING]")
-        print(f"    - {tweet}..."+ tweet)
+        print(f"    - {tweet[:150]}...")
 
