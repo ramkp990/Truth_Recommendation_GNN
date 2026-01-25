@@ -312,7 +312,39 @@ quotes = quotes.rename(columns={
 })
 quotes["interaction"] = "QT"
 quotes["timestamp"] = quotes["timestamp"]  # quotes has actual timestamp
-activity_raw = pd.concat([replies, quotes], ignore_index=True)
+#activity_raw = pd.concat([replies, quotes], ignore_index=True)
+#activity_raw = quotes
+
+
+import re
+import unicodedata
+
+def clean_tweet_text(text):
+    if not isinstance(text, str) or not text.strip():
+        return "[EMPTY]"
+    
+    # 1. Normalize Unicode (convert emojis to standard form)
+    text = unicodedata.normalize('NFKC', text)
+    
+    # 2. Remove duplicate consecutive sentences (common in Truth Social data)
+    sentences = [s.strip() for s in text.split('.') if s.strip()]
+    unique_sentences = []
+    for s in sentences:
+        if not unique_sentences or s != unique_sentences[-1]:
+            unique_sentences.append(s)
+    text = '. '.join(unique_sentences) + ('.' if unique_sentences else '')
+    
+    # 3. Remove extra whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # 4. Handle emoji placeholders like "<emoji: fire>"
+    text = re.sub(r'<emoji:\s*\w+\s*>', ' [EMOJI] ', text)
+    
+    # 5. If still empty, use placeholder
+    if not text or len(text) < 3:
+        return "[EMPTY]"
+    
+    return text[:512]  # Truncate to max length for Sentence-BERT
 
 # ----------------------------
 # 1. Load Truth Social activity (FIXED)
@@ -343,7 +375,7 @@ def load_truths_correct(tsv_file):
     return pd.DataFrame(records)
 
 truths = load_truths_correct("truth_social/truths.tsv")
-
+#print(truths['id'])
 # Load quotes
 quotes = pd.read_csv(
     "truth_social/quotes.tsv",
@@ -393,15 +425,15 @@ social['follower'] = social['follower'].astype(str)
 social['followed'] = social['followed'].astype(str)
 social.rename(columns={"followed": "followee"}, inplace=True)
 
-activity = pd.concat([activity, replies], ignore_index=True)
+#activity = pd.concat([activity, replies], ignore_index=True)
 #activity = activity[["engager", "target_user", "timestamp", "interaction", "tweet"]].dropna().reset_index(drop=True)
 
 # ----------------------------
 # 3. Subset to top 5K users
 # ----------------------------
 user_counts = pd.concat([activity["engager"], activity["target_user"]]).value_counts()
-top_users = user_counts.head(5000).index
-
+#top_users = user_counts.head(5000).index
+top_users = user_counts.index
 activity_sub = activity[
     activity["engager"].isin(top_users) & 
     activity["target_user"].isin(top_users)
@@ -411,6 +443,24 @@ activity_sub["post_id"] = activity_sub.index
 #social['followee'] = social['followee'].astype(str)
 activity_sub['engager'] = activity_sub['engager'].astype(str)
 activity_sub['target_user'] = activity_sub['target_user'].astype(str)
+
+# ----------------------------
+# DEBUG: Save sample of merged data to inspect real content
+# ----------------------------
+print("Saving debug sample to debug_activity_sample.txt...")
+debug_sample = activity_sub.copy()
+with open("debug_activity_sample.txt", "w", encoding="utf-8") as f:
+    for idx, row in debug_sample.iterrows():
+        f.write(f"=== POST {idx} ===\n")
+        f.write(f"Engager: {row['engager']}\n")
+        f.write(f"Target User: {row['target_user']}\n")
+        f.write(f"Interaction: {row['interaction']}\n")
+        f.write(f"Raw Tweet Text:\n{repr(row['tweet'])}\n")  # Shows hidden chars
+        f.write(f"Cleaned Preview:\n{row['tweet'][:200]}\n")
+        f.write("-" * 50 + "\n\n")
+
+print("✅ Debug sample saved to debug_activity_sample.txt")
+
 # ----------------------------
 # 4. Build node mappings
 # ----------------------------
@@ -516,10 +566,14 @@ user_features = torch.tensor(np.stack([
 ], axis=1), dtype=torch.float)
 
 # Post features
-print("Encoding tweet semantics...")
+# After loading activity_sub
+activity_sub["tweet_clean"] = activity_sub["tweet"].apply(clean_tweet_text)
+
+# Encode cleaned text
+print("Encoding cleaned tweet semantics...")
 encoder = SentenceTransformer('all-MiniLM-L6-v2')
-tweets = activity_sub["tweet"].tolist()
-tweet_embeddings = encoder.encode(tweets, show_progress_bar=True)
+tweets_clean = activity_sub["tweet_clean"].tolist()
+tweet_embeddings = encoder.encode(tweets_clean, show_progress_bar=True)
 tweet_embeddings = torch.tensor(tweet_embeddings, dtype=torch.float)
 
 interaction_map = {"QT": 0, "RE": 1}  # Add QT, remove unused RT/MT
