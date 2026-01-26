@@ -219,20 +219,6 @@ print(f"Quote activity shape: {quote_activity.shape}")
 activity = pd.concat([quote_activity, reply_activity], ignore_index=True)
 print(f"Combined activity (QT + RE): {len(activity)}")
 
-'''
-# ----------------------------
-# Deduplication
-# ----------------------------
-print("Deduplicating by normalized text...")
-def normalize_text(text):
-    if not isinstance(text, str):
-        return ""
-    return " ".join(text.lower().strip().split())
-
-activity["text_norm"] = activity["tweet"].apply(normalize_text)
-activity = activity.drop_duplicates(subset=["text_norm"], keep="first").reset_index(drop=True)
-activity.drop(columns=["text_norm"], inplace=True)
-'''
 print(f"Combined activity (QT + RE): {len(activity)}")
 
 activity = pd.concat([quote_activity, reply_activity], ignore_index=True)
@@ -313,6 +299,7 @@ print(f"Final activity shape: {activity_sub.shape}")
 # ----------------------------
 # Only include users in activity
 users = sorted(set(activity_sub["engager"]) | set(activity_sub["target_user"]))
+
 U = len(users)
 P = len(activity_sub)
 
@@ -411,3 +398,15 @@ print(f"\n✅ Saved graph:")
 print(f"   Users: {U}")
 print(f"   Posts: {P}")
 print(f"   Social edges: {edge_index_social.shape[1]}")
+
+
+# Save the SentenceTransformer model name (it's stateless)
+import json
+with open("model_config.json", "w") as f:
+    json.dump({
+        "text_encoder": "all-MiniLM-L6-v2",
+        "max_post_length": 512,
+        "feature_dim": post_features.shape[1]
+    }, f)
+
+print("Saved model configuration.")

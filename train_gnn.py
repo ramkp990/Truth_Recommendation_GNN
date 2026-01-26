@@ -382,15 +382,6 @@ mask = (post_local >= 0) & (post_local < num_posts) & (dst < num_users)
 graph['post', 'authored_by', 'user'].edge_index = torch.stack([post_local[mask], dst[mask]], dim=0)
 
 
-# Edge 4: followed_by (post → user) ← NEW!
-#src, dst = data['edge_index_followed_by']
-#if src.numel() > 0:
-    #post_local = src - num_users
-    #mask = (post_local >= 0) & (post_local < num_posts) & (dst < num_users)
-    #graph['post', 'followed_by', 'user'].edge_index = torch.stack([post_local[mask], dst[mask]], dim=0)
-#else:
-#    graph['post', 'followed_by', 'user'].edge_index = torch.empty((2, 0), dtype=torch.long)
-
 # Add reverse edges (for message passing)
 graph['post', 'rev_engages', 'user'].edge_index = graph['user', 'engages', 'post'].edge_index.flip(0)
 
