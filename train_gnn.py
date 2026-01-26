@@ -296,6 +296,8 @@ num_users = graph['user'].num_nodes
 num_posts = graph['post'].num_nodes
 '''
 
+
+
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import HeteroData
@@ -315,10 +317,6 @@ x = data['x']
 
 num_users = data['num_users']
 num_posts = data['num_posts']
-
-# Boost semantic part (optional)
-semantic_boost = 2.0
-x[num_users:, 3:] *= semantic_boost
 
 # ----------------------------
 # Temporal split
@@ -383,14 +381,15 @@ post_local = src - num_users
 mask = (post_local >= 0) & (post_local < num_posts) & (dst < num_users)
 graph['post', 'authored_by', 'user'].edge_index = torch.stack([post_local[mask], dst[mask]], dim=0)
 
+
 # Edge 4: followed_by (post → user) ← NEW!
-src, dst = data['edge_index_followed_by']
-if src.numel() > 0:
-    post_local = src - num_users
-    mask = (post_local >= 0) & (post_local < num_posts) & (dst < num_users)
-    graph['post', 'followed_by', 'user'].edge_index = torch.stack([post_local[mask], dst[mask]], dim=0)
-else:
-    graph['post', 'followed_by', 'user'].edge_index = torch.empty((2, 0), dtype=torch.long)
+#src, dst = data['edge_index_followed_by']
+#if src.numel() > 0:
+    #post_local = src - num_users
+    #mask = (post_local >= 0) & (post_local < num_posts) & (dst < num_users)
+    #graph['post', 'followed_by', 'user'].edge_index = torch.stack([post_local[mask], dst[mask]], dim=0)
+#else:
+#    graph['post', 'followed_by', 'user'].edge_index = torch.empty((2, 0), dtype=torch.long)
 
 # Add reverse edges (for message passing)
 graph['post', 'rev_engages', 'user'].edge_index = graph['user', 'engages', 'post'].edge_index.flip(0)
@@ -399,17 +398,17 @@ graph['post', 'rev_engages', 'user'].edge_index = graph['user', 'engages', 'post
 # Updated WeightedRGCN Model
 # ----------------------------
 class WeightedRGCN(torch.nn.Module):
-    def __init__(self, hidden_dim=32):
+    def __init__(self, hidden_dim=64):
         super().__init__()
         self.msg_direct = SAGEConv((-1, -1), hidden_dim)   # user ← post (engagement)
-        self.msg_author = SAGEConv((-1, -1), hidden_dim)   # user ← post (follows author)
+        #self.msg_author = SAGEConv((-1, -1), hidden_dim)   # user ← post (follows author)
         self.msg_social = SAGEConv((-1, -1), hidden_dim)   # user ← user (social)
         self.post_update = SAGEConv((-1, -1), hidden_dim)  # post ← user (engagement)
         
         # FIXED weights
-        self.w_direct = 1.75   # strongest
-        self.w_author = 0.7   # medium
-        self.w_social = 0.3   # weakest
+        self.w_direct = 1.0   # strongest
+        #self.w_author = 0.7   # medium
+        self.w_social = 0.75   # weakest
 
     def forward(self, x_dict, edge_index_dict):
         user_x, post_x = x_dict['user'], x_dict['post']
@@ -419,10 +418,10 @@ class WeightedRGCN(torch.nn.Module):
             (post_x, user_x),
             edge_index_dict[('post', 'rev_engages', 'user')]
         )
-        msg_author = self.msg_author(
-            (post_x, user_x),
-            edge_index_dict[('post', 'followed_by', 'user')]
-        )
+        #msg_author = self.msg_author(
+         #   (post_x, user_x),
+          #  edge_index_dict[('post', 'followed_by', 'user')]
+        #)
         msg_social = self.msg_social(
             (user_x, user_x),
             edge_index_dict[('user', 'social', 'user')]
@@ -430,7 +429,7 @@ class WeightedRGCN(torch.nn.Module):
         
         user_out = F.relu(
             self.w_direct * msg_direct +
-            self.w_author * msg_author +
+            #self.w_author * msg_author +
             self.w_social * msg_social
         )
         
@@ -463,10 +462,25 @@ num_posts = graph['post'].num_nodes
 print(f"Training on {train_edge_index.shape[1]} positive edges")
 print(f"Users: {num_users}, Posts: {num_posts}")
 
+
+# Precompute mapping: global post ID → interaction type
+global_post_to_interaction = {}
+for _, row in train_interactions.iterrows():
+    local_post_id = row["post_id"]
+    global_post_id = post_to_idx[local_post_id]  # local → global
+    global_post_to_interaction[global_post_id] = row["interaction"]
+
+# Convert to tensor for fast lookup (optional but faster)
+max_global_post_id = max(post_to_idx.values())
+interaction_type_tensor = torch.zeros(max_global_post_id + 1, dtype=torch.float32, device=device)
+for gid, inter in global_post_to_interaction.items():
+    weight = 3.0 if inter == "QT" else 1.0
+    interaction_type_tensor[gid] = weight
+
 # ----------------------------
 # Training Function
 # ----------------------------
-def train1():
+def train():
     model.train()
     optimizer.zero_grad()
 
@@ -475,48 +489,29 @@ def train1():
     user_emb = out['user']  # [num_users, 64]
     post_emb = out['post']  # [num_posts, 64]
 
-    # Positive scores
-    pos_u, pos_p = train_edge_index
+    # Positive edges
+    pos_u, pos_p = train_edge_index  # pos_p is LOCAL post index
+
+    # Compute positive scores
     pos_scores = (user_emb[pos_u] * post_emb[pos_p]).sum(dim=1)  # [num_pos]
 
-    # Negative sampling: for each positive, sample 1 negative post
-    neg_p = torch.randint(0, num_posts, (pos_p.size(0),), device=device)
-    neg_scores = (user_emb[pos_u] * post_emb[neg_p]).sum(dim=1)  # [num_pos]
+    # --- Apply weights based on interaction type ---
+    # Convert local post index → global post ID
+    pos_global_post_ids = pos_p + num_users  # because posts start at index = num_users
 
-    # Loss
-    pos_loss = criterion(pos_scores, torch.ones_like(pos_scores))
-    neg_loss = criterion(neg_scores, torch.zeros_like(neg_scores))
-    loss = pos_loss + neg_loss
-
-    loss.backward()
-    optimizer.step()
-    return loss.item()
-
-def train(batch_size=32):
-    model.train()
-    optimizer.zero_grad()
-
-    # Forward pass (still full graph - this is fine for GNNs)
-    out = model(x_dict, graph.edge_index_dict)
-    user_emb = out['user']
-    post_emb = out['post']
-
-    # Sample a mini-batch of positive edges
-    num_pos = train_edge_index.size(1)
-    batch_indices = torch.randperm(num_pos)[:batch_size]
-    pos_u, pos_p = train_edge_index[:, batch_indices]
-
-    # Positive scores
-    pos_scores = (user_emb[pos_u] * post_emb[pos_p]).sum(dim=1)
+    # Fetch weights using precomputed tensor
+    pos_weights = interaction_type_tensor[pos_global_post_ids]  # shape: [num_pos]
 
     # Negative sampling
     neg_p = torch.randint(0, num_posts, (pos_p.size(0),), device=device)
     neg_scores = (user_emb[pos_u] * post_emb[neg_p]).sum(dim=1)
 
-    # Loss
+    # Loss with weighting
     pos_loss = criterion(pos_scores, torch.ones_like(pos_scores))
     neg_loss = criterion(neg_scores, torch.zeros_like(neg_scores))
-    loss = pos_loss + neg_loss
+
+    weighted_pos_loss = (pos_weights * pos_loss).mean()
+    loss = weighted_pos_loss + neg_loss
 
     loss.backward()
     optimizer.step()
@@ -593,10 +588,9 @@ best_recall = 0.0
 patience = 20
 patience_counter = 0
 
-for epoch in range(1, 101):
-    loss = train(batch_size=32)
-    if epoch % 1 == 0:
-        torch.cuda.empty_cache()
+for epoch in range(1, 201):  # 100 epochs
+    loss = train()
+    
     if epoch % 10 == 0:
         model.eval()
         with torch.no_grad():
@@ -686,10 +680,9 @@ for user_global in test_users_sample:
     print("  ✅ True future engagements:")
     for p in true_posts_global:
         tweet = tweet_lookup.get(p, "[MISSING]")
-        print(f"    - {tweet[:150]}...")
+        print(f"    - {tweet}..."+ tweet)
     
     print("  🎯 Top recommendations:")
     for p in top_posts_global:
         tweet = tweet_lookup.get(p, "[MISSING]")
-        print(f"    - {tweet[:150]}...")
-
+        print(f"    - {tweet}..."+ tweet)
