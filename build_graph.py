@@ -439,6 +439,8 @@ import unicodedata
 from urllib.parse import urlparse
 import csv
 import sys
+import torch.nn.functional as F
+
 
 # ----------------------------
 # Text Cleaning & URL Enrichment
@@ -798,6 +800,14 @@ interaction_feats[post_mask, 2] = 1.0
 
 post_features = torch.cat([interaction_feats, tweet_embeddings], dim=1)
 
+
+proj_user = torch.randn(3, 64)
+proj_post = torch.randn(387, 64)
+
+user_features_64 = F.normalize(torch.mm(user_features_tensor, proj_user), dim=1)
+post_features_64 = F.normalize(torch.mm(post_features, proj_post), dim=1)
+
+
 # Pad user features
 post_feat_dim = post_features.size(1)
 user_feat_dim = user_features_tensor.size(1)
@@ -807,8 +817,11 @@ if user_feat_dim < post_feat_dim:
 else:
     user_features_padded = user_features_tensor
 
-x = torch.cat([user_features_padded, post_features], dim=0)
 
+
+
+x = torch.cat([user_features_padded, post_features], dim=0)
+x = torch.cat([user_features_64, post_features_64], dim=0)
 # ----------------------------
 # Save
 # ----------------------------
@@ -828,6 +841,8 @@ print(f"\n✅ Saved graph:")
 print(f"   Users: {U}")
 print(f"   Posts: {P}")
 print(f"   Social edges: {edge_index_social.shape[1]}")
+print(f"   Engagement edges: {edge_index_engage.shape[1]}")
+print(f"   Authorship edges: {edge_index_author.shape[1]}")
 
 # Save model config
 import json
